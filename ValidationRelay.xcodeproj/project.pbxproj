@@ -17,6 +17,8 @@
 		48D8604A2BB0DD110092EF79 /* ValidationData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48D860492BB0DD110092EF79 /* ValidationData.swift */; };
 		48D8604D2BB1B8CC0092EF79 /* NWWebSocket in Frameworks */ = {isa = PBXBuildFile; productRef = 48D8604C2BB1B8CC0092EF79 /* NWWebSocket */; };
 		48D8604F2BB1B8EB0092EF79 /* Relay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48D8604E2BB1B8EB0092EF79 /* Relay.swift */; };
+		CF1000020000000000000001 /* RelayCredentials.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF1000010000000000000001 /* RelayCredentials.swift */; };
+		CF1000020000000000000002 /* ReconnectPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF1000010000000000000002 /* ReconnectPolicy.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -34,6 +36,8 @@
 		48D860482BB0D7BF0092EF79 /* build.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = build.sh; sourceTree = "<group>"; };
 		48D860492BB0DD110092EF79 /* ValidationData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ValidationData.swift; sourceTree = "<group>"; };
 		48D8604E2BB1B8EB0092EF79 /* Relay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Relay.swift; sourceTree = "<group>"; };
+		CF1000010000000000000001 /* RelayCredentials.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayCredentials.swift; sourceTree = "<group>"; };
+		CF1000010000000000000002 /* ReconnectPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReconnectPolicy.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -80,6 +84,8 @@
 				480989AF2BB0C0AF00B49AE8 /* ValidationRelay-Bridging-Header.h */,
 				48D860492BB0DD110092EF79 /* ValidationData.swift */,
 				48D8604E2BB1B8EB0092EF79 /* Relay.swift */,
+				CF1000010000000000000001 /* RelayCredentials.swift */,
+				CF1000010000000000000002 /* ReconnectPolicy.swift */,
 				48D289172BB3A5A700EA9DEC /* LogView.swift */,
 			);
 			path = ValidationRelay;
@@ -184,6 +190,8 @@
 				48D289182BB3A5A700EA9DEC /* LogView.swift in Sources */,
 				480989A22BB0C01900B49AE8 /* ValidationRelayApp.swift in Sources */,
 				48D8604F2BB1B8EB0092EF79 /* Relay.swift in Sources */,
+				CF1000020000000000000001 /* RelayCredentials.swift in Sources */,
+				CF1000020000000000000002 /* ReconnectPolicy.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
