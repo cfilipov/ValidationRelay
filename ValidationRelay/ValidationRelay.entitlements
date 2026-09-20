@@ -9,5 +9,7 @@
 	</array>
 	<key>abs-client</key>
 	<integer>772496756</integer>
+	<key>com.apple.private.security.container-required</key>
+	<string>dev.jjtech.experiments.ValidationRelay</string>
 </dict>
 </plist>
