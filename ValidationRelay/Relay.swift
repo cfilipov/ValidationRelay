@@ -1,209 +1,472 @@
-//
-//  Relay.swift
-//  ValidationRelay
-//
-//  Created by James Gill on 3/25/24.
-//
-
 import Foundation
 import Network
 import NWWebSocket
 import SwiftUI
+import UIKit
 
-func getIdentifiers() -> [String: String] {
-    var ustruct: utsname = utsname()
-    uname(&ustruct)
-    var ustruct2 = ustruct
-    let machine = withUnsafePointer(to: &ustruct2.machine) {
-        $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout.size(ofValue: ustruct.machine)) {
+private func copyMobileGestaltString(_ key: String) -> String? {
+    guard let answer = MGCopyAnswer(key as CFString) else {
+        return nil
+    }
+    return answer.takeRetainedValue() as? String
+}
+
+func getIdentifiers() -> [String: String]? {
+    var systemInfo = utsname()
+    uname(&systemInfo)
+    var machineInfo = systemInfo.machine
+    let machineCapacity = MemoryLayout.size(ofValue: machineInfo)
+    let machine = withUnsafePointer(to: &machineInfo) {
+        $0.withMemoryRebound(to: CChar.self, capacity: machineCapacity) {
             String(cString: $0)
         }
     }
-    
-    
-    let identifiers = [
+
+    guard let softwareBuildID = buildNumber(),
+          let uniqueDeviceID = copyMobileGestaltString("UniqueDeviceID"),
+          let serialNumber = copyMobileGestaltString("SerialNumber") else {
+        return nil
+    }
+
+    return [
         "hardware_version": machine,
         "software_name": "iPhone OS",
         "software_version": UIDevice.current.systemVersion,
-        "software_build_id": buildNumber()!,
-        "unique_device_id": MGCopyAnswer("UniqueDeviceID" as CFString)!.takeRetainedValue() as! String,
-        "serial_number": MGCopyAnswer("SerialNumber" as CFString)!.takeRetainedValue() as! String
-        
+        "software_build_id": softwareBuildID,
+        "unique_device_id": uniqueDeviceID,
+        "serial_number": serialNumber
     ]
-    return identifiers
 }
 
-class RelayConnectionManager: ObservableObject {
-    @Published var registrationCode: String = "None"
-    @Published var connectionStatusMessage: String = ""
+final class RelayConnectionManager: ObservableObject {
+    private enum ConnectionState {
+        case stopped
+        case connecting
+        case connected
+        case waitingToReconnect
+    }
+
+    @Published private(set) var registrationCode = "None"
+    @Published var connectionStatusMessage = ""
     @Published var logItems = LogItems()
-    
-    // These must all be saved together
-    @AppStorage("savedRegistrationSecret") public var savedRegistrationSecret = ""
-    @AppStorage("savedRegistrationCode") public var savedRegistrationCode = ""
-    @AppStorage("savedRegistrationURL") public var savedRegistrationURL = ""
-    
-    var currentURL: URL? = nil
-    var connectionDelegate: RelayConnectionDelegate? = nil
-    
-    var reconnectWork: DispatchWorkItem? = nil
-    
-    var backoff: Int = 2
-    let maxBackoff: Int = 64
+
+    private let credentialStore: RelayCredentialStore
+    private let connectionTimeout: TimeInterval = 30
+    private let heartbeatInterval: TimeInterval = 30
+    private let staleConnectionInterval: TimeInterval = 90
+
+    private var connectionState: ConnectionState = .stopped
+    private var currentURL: URL?
+    private var connectionDelegate: RelayConnectionDelegate?
+    private var reconnectWork: DispatchWorkItem?
+    private var connectionTimeoutWork: DispatchWorkItem?
+    private var watchdogTimer: DispatchSourceTimer?
+    private var lastActivityAt: Date?
+    private var connectionStartedAt: Date?
+    private var shouldConnect = false
+    private var reconnectPolicy = RelayReconnectPolicy()
+
+    init(credentialStore: RelayCredentialStore = RelayCredentialStore()) {
+        self.credentialStore = credentialStore
+        if case .available(let credentials) = credentialStore.load() {
+            registrationCode = credentials.code
+        }
+    }
+
+    func connectIfNeeded(_ url: URL) {
+        guard shouldConnect,
+              currentURL == url,
+              connectionDelegate != nil else {
+            connect(url)
+            return
+        }
+
+        switch connectionState {
+        case .connecting, .connected, .waitingToReconnect:
+            return
+        case .stopped:
+            connect(url)
+        }
+    }
 
     func connect(_ url: URL) {
-        logItems.log("Connecting to \(url)")
-        connectionStatusMessage = "Connecting..."
-        currentURL = url
-        
-        backoff = 2 // Reset backoff
-        
-        reconnectWork?.cancel()
-        reconnectWork = nil
+        guard credentialStore.load() != .incomplete else {
+            shouldConnect = false
+            connectionStatusMessage = "Saved relay credentials are incomplete. Reset the registration code to create a new relay ID."
+            logItems.log("Refusing to replace incomplete saved relay credentials", isError: true)
+            return
+        }
 
-        connectionDelegate = RelayConnectionDelegate(manager: self)
+        shouldConnect = true
+        currentURL = url
+        reconnectPolicy.reset()
+        cancelScheduledWork()
+        stopWatchdog()
+        retireActiveConnection()
+        beginConnection(to: url)
     }
 
     func disconnect() {
         logItems.log("Disconnecting on request")
-        connectionStatusMessage = ""
+        shouldConnect = false
         currentURL = nil
-        
-        reconnectWork?.cancel()
-        reconnectWork = nil
-        
-        connectionDelegate?.disconnect()
-        connectionDelegate = nil
+        connectionState = .stopped
+        connectionStatusMessage = ""
+        cancelScheduledWork()
+        stopWatchdog()
+        retireActiveConnection()
     }
 
-    func triggerReconnect() {
-        logItems.log("Triggering reconnect")
+    func refreshOnForeground(_ url: URL) {
+        guard shouldConnect, currentURL == url else {
+            connect(url)
+            return
+        }
+
+        if connectionState == .connected,
+           let lastActivityAt,
+           Date().timeIntervalSince(lastActivityAt) <= staleConnectionInterval {
+            return
+        }
+
+        if connectionState == .connecting,
+           let connectionStartedAt,
+           Date().timeIntervalSince(connectionStartedAt) <= connectionTimeout {
+            return
+        }
+
+        logItems.log("App became active; reconnecting immediately")
+        reconnectPolicy.reset()
+        cancelScheduledWork()
+        stopWatchdog()
+        retireActiveConnection()
+        beginConnection(to: url)
+    }
+
+    func resetRegistration() {
+        credentialStore.clear()
+        registrationCode = "None"
+        disconnect()
+    }
+
+    fileprivate func isActive(_ delegate: RelayConnectionDelegate) -> Bool {
+        connectionDelegate === delegate
+    }
+
+    fileprivate func didConnect(_ delegate: RelayConnectionDelegate) -> Bool {
+        guard isActive(delegate) else {
+            return false
+        }
+
+        connectionState = .connected
+        connectionStatusMessage = "Connected"
+        connectionTimeoutWork?.cancel()
+        connectionTimeoutWork = nil
+        lastActivityAt = Date()
+        startWatchdog()
+        logItems.log("Websocket connected")
+        return true
+    }
+
+    fileprivate func noteActivity(from delegate: RelayConnectionDelegate) {
+        guard isActive(delegate) else {
+            return
+        }
+        lastActivityAt = Date()
+        reconnectPolicy.reset()
+    }
+
+    fileprivate func credentials(for url: URL) -> RelayCredentials? {
+        guard case .available(let credentials) = credentialStore.load(),
+              credentials.serverURL == url.absoluteString else {
+            return nil
+        }
+        return credentials
+    }
+
+    fileprivate func saveCredentials(code: String, secret: String, from delegate: RelayConnectionDelegate) {
+        guard isActive(delegate),
+              Self.isValidCredentialValue(code, maximumLength: 128),
+              Self.isValidCredentialValue(secret, maximumLength: 512) else {
+            if isActive(delegate) {
+                logItems.log("Rejected malformed registration credentials", isError: true)
+            }
+            return
+        }
+
+        let credentials = RelayCredentials(
+            code: code,
+            secret: secret,
+            serverURL: delegate.url.absoluteString
+        )
+        let isNewCode = registrationCode != code
+        credentialStore.save(credentials)
+        registrationCode = code
+        if isNewCode {
+            logItems.log("Received new registration credentials")
+        }
+    }
+
+    fileprivate func connectionFailed(_ delegate: RelayConnectionDelegate, message: String) {
+        guard isActive(delegate) else {
+            return
+        }
+        logItems.log(message, isError: true)
+        scheduleReconnect(afterFailureFrom: delegate)
+    }
+
+    private func beginConnection(to url: URL) {
+        guard shouldConnect, currentURL == url else {
+            return
+        }
+
+        connectionState = .connecting
+        connectionStatusMessage = "Connecting..."
+        connectionStartedAt = Date()
+        logItems.log("Connecting to \(Self.redactedEndpoint(url))")
+
+        let delegate = RelayConnectionDelegate(manager: self, url: url)
+        connectionDelegate = delegate
+        scheduleConnectionTimeout(for: delegate)
+        delegate.connect(heartbeatInterval: heartbeatInterval)
+    }
+
+    private func scheduleConnectionTimeout(for delegate: RelayConnectionDelegate) {
+        connectionTimeoutWork?.cancel()
+        let work = DispatchWorkItem { [weak self, weak delegate] in
+            guard let self, let delegate, self.isActive(delegate), self.connectionState == .connecting else {
+                return
+            }
+            self.connectionTimeoutWork = nil
+            self.connectionFailed(delegate, message: "Websocket connection timed out")
+        }
+        connectionTimeoutWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + connectionTimeout, execute: work)
+    }
+
+    private func scheduleReconnect(afterFailureFrom delegate: RelayConnectionDelegate) {
+        guard isActive(delegate), shouldConnect, let url = currentURL else {
+            return
+        }
+
+        cancelScheduledWork()
+        stopWatchdog()
+        retireActiveConnection()
+
+        let delay = reconnectPolicy.consumeDelay()
+        connectionState = .waitingToReconnect
         connectionStatusMessage = "Reconnecting..."
-        // Delete the delegate so that more errors don't come in
-        connectionDelegate?.disconnect()
-        connectionDelegate = nil
-        print("Waiting for \(backoff) backoff seconds")
-        
+        logItems.log("Retrying websocket connection in \(Int(delay)) seconds")
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else {
+                return
+            }
+            self.reconnectWork = nil
+            guard self.shouldConnect, self.currentURL == url else {
+                return
+            }
+            self.beginConnection(to: url)
+        }
+        reconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func startWatchdog() {
+        stopWatchdog(clearLastActivity: false)
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + heartbeatInterval, repeating: heartbeatInterval)
+        timer.setEventHandler { [weak self] in
+            guard let self,
+                  self.connectionState == .connected,
+                  let delegate = self.connectionDelegate,
+                  let lastActivityAt = self.lastActivityAt,
+                  Date().timeIntervalSince(lastActivityAt) > self.staleConnectionInterval else {
+                return
+            }
+            self.connectionFailed(delegate, message: "Websocket heartbeat timed out")
+        }
+        watchdogTimer = timer
+        timer.resume()
+    }
+
+    private func stopWatchdog(clearLastActivity: Bool = true) {
+        watchdogTimer?.cancel()
+        watchdogTimer = nil
+        if clearLastActivity {
+            lastActivityAt = nil
+        }
+    }
+
+    private func cancelScheduledWork() {
         reconnectWork?.cancel()
         reconnectWork = nil
-        
-        let work = DispatchWorkItem {
-            self.connectionDelegate = RelayConnectionDelegate(manager: self)
-        }
-        // Wait a bit then try again
-        DispatchQueue.main.asyncAfter(deadline: .now() + DispatchTimeInterval.seconds(backoff), execute: work)
-        
-        reconnectWork = work
-        backoff = min(backoff * 2, maxBackoff)
+        connectionTimeoutWork?.cancel()
+        connectionTimeoutWork = nil
+    }
+
+    private func retireActiveConnection() {
+        let oldDelegate = connectionDelegate
+        connectionDelegate = nil
+        connectionStartedAt = nil
+        oldDelegate?.disconnect()
+    }
+
+    private static func redactedEndpoint(_ url: URL) -> String {
+        let port = url.port.map { ":\($0)" } ?? ""
+        return "\(url.scheme ?? "wss")://\(url.host ?? "relay")\(port)"
+    }
+
+    private static func isValidCredentialValue(_ value: String, maximumLength: Int) -> Bool {
+        !value.isEmpty
+            && value.count <= maximumLength
+            && value.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
     }
 }
 
-class RelayConnectionDelegate: WebSocketConnectionDelegate, ObservableObject {
-    var connection: WebSocketConnection
-    let manager: RelayConnectionManager
+final class RelayConnectionDelegate: WebSocketConnectionDelegate {
+    let url: URL
 
-    init(
-        manager: RelayConnectionManager
-    ) {
+    private var connection: WebSocketConnection
+    private weak var manager: RelayConnectionManager?
+
+    init(manager: RelayConnectionManager, url: URL) {
         self.manager = manager
-        connection = NWWebSocket(url: manager.currentURL!, connectAutomatically: true)
+        self.url = url
+        connection = NWWebSocket(url: url, connectAutomatically: false, connectionQueue: .main)
         connection.delegate = self
-        connection.ping(interval: 30)
     }
-    
+
+    func connect(heartbeatInterval: TimeInterval) {
+        connection.connect()
+        connection.ping(interval: heartbeatInterval)
+    }
+
     func disconnect() {
+        connection.delegate = nil
         connection.disconnect(closeCode: .protocolCode(.normalClosure))
     }
-    
+
     func webSocketDidConnect(connection: WebSocketConnection) {
-        manager.logItems.log("Websocket did connect")
-        manager.connectionStatusMessage = "Connected"
-        var registerCommand = ["command": "register", "data": ["": ""]] as [String : Any]
-        if manager.currentURL?.absoluteString == manager.savedRegistrationURL {
-            print("Using saved registration code")
-            manager.logItems.log("Using saved registration code \(manager.savedRegistrationCode)")
-            manager.logItems.log("Using saved registration secret \(manager.savedRegistrationSecret)")
-            registerCommand["data"] = ["code": manager.savedRegistrationCode, "secret": manager.savedRegistrationSecret]
+        guard let manager, manager.didConnect(self) else {
+            disconnect()
+            return
         }
-        let data = try! JSONSerialization.data(withJSONObject: registerCommand)
-        print(String(data: data, encoding: .utf8)!)
-        connection.send(string: String(data: data, encoding: .utf8)!)
+
+        var registrationData: [String: String] = [:]
+        if let credentials = manager.credentials(for: url) {
+            manager.logItems.log("Using saved registration credentials")
+            registrationData = ["code": credentials.code, "secret": credentials.secret]
+        }
+        sendJSON(["command": "register", "data": registrationData], over: connection)
     }
-    
-    func webSocketDidDisconnect(connection: WebSocketConnection, closeCode: NWProtocolWebSocket.CloseCode, reason: Data?) {
-        manager.logItems.log("Websocket did disconnect", isError: true)
-        print("Disconnected")
+
+    func webSocketDidDisconnect(
+        connection: WebSocketConnection,
+        closeCode: NWProtocolWebSocket.CloseCode,
+        reason: Data?
+    ) {
+        manager?.connectionFailed(self, message: "Websocket disconnected")
     }
-    
+
     func webSocketViabilityDidChange(connection: WebSocketConnection, isViable: Bool) {
-        // Respond to a WebSocket connection viability change event
-        print("WebSocket connection viability changed to \(isViable), ignoring")
-    }
-    
-    func webSocketDidAttemptBetterPathMigration(result: Result<WebSocketConnection, NWError>) {
-        // Respond to when a WebSocket connection migrates to a better network path
-        // (e.g. A device moves from a cellular connection to a Wi-Fi connection)
-        print("WebSocket connection attempted better path migration, ignoring")
-    }
-    
-    func webSocketDidReceiveError(connection: WebSocketConnection, error: NWError) {
-        print(error)
-        manager.logItems.log("Websocket error: \(error)", isError: true)
-        self.manager.triggerReconnect()
-    }
-    
-    func webSocketDidReceivePong(connection: WebSocketConnection) {
-        // Respond to a WebSocket connection receiving a Pong from the peer
-        //print("pong")
-    }
-    
-    func webSocketDidReceiveMessage(connection: WebSocketConnection, string: String) {
-        print("Got string msg")
-        // Parse as JSON
-        let json = try! JSONSerialization.jsonObject(with: string.data(using: .utf8)!, options: [])
-        print(json)
-        
-        // Save registration code
-        if let jsonDict = json as? [String: Any] {
-            if let data = jsonDict["data"] as? [String: Any] {
-                if let code = data["code"] as? String {
-                    manager.registrationCode = code
-                    if manager.savedRegistrationCode != code {
-                        manager.logItems.log("New registration code \(code)")
-                        manager.logItems.log("secret \(data["secret"] as? String ?? "")")
-                    }
-                    manager.savedRegistrationCode = code
-                    manager.savedRegistrationSecret = data["secret"] as? String ?? ""
-                    manager.savedRegistrationURL = manager.currentURL?.absoluteString ?? ""
-                }
-            }
-            if let command = jsonDict["command"] as? String {
-                if command == "get-version-info" {
-                    let versionInfo = ["command": "response", "data": ["versions": getIdentifiers()], "id": jsonDict["id"]!] as [String : Any]
-                    print("Sending version info: \(versionInfo)")
-                    manager.logItems.log("Sending version info: \(versionInfo)")
-                    let data = try! JSONSerialization.data(withJSONObject: versionInfo)
-                    connection.send(string: String(data: data, encoding: .utf8)!)
-                }
-                if command == "get-validation-data" {
-                    print("Sending val data")
-                    let v = generateValidationData()
-                    print("Validation data: \(v.base64EncodedString())")
-                    manager.logItems.log("Generated validation data: \(v.base64EncodedString())")
-                    let validationData = ["command": "response", "data": ["data": v.base64EncodedString()], "id": jsonDict["id"]!] as [String : Any]
-                    let data = try! JSONSerialization.data(withJSONObject: validationData)
-                    connection.send(string: String(data: data, encoding: .utf8)!)
-                }
-            }
+        guard !isViable, let manager, manager.isActive(self) else {
+            return
         }
-        // Respond to a WebSocket connection receiving a `String` message
+        manager.logItems.log("Websocket network path is temporarily unavailable")
     }
-    
+
+    func webSocketDidAttemptBetterPathMigration(result: Result<WebSocketConnection, NWError>) {
+        guard let manager, manager.isActive(self) else {
+            return
+        }
+        if case .failure = result {
+            manager.logItems.log("Websocket network path migration failed", isError: true)
+        }
+    }
+
+    func webSocketDidReceiveError(connection: WebSocketConnection, error: NWError) {
+        manager?.connectionFailed(self, message: "Websocket error: \(error)")
+    }
+
+    func webSocketDidReceivePong(connection: WebSocketConnection) {
+        manager?.noteActivity(from: self)
+    }
+
+    func webSocketDidReceiveMessage(connection: WebSocketConnection, string: String) {
+        guard let manager, manager.isActive(self) else {
+            return
+        }
+        manager.noteActivity(from: self)
+
+        guard let encodedMessage = string.data(using: .utf8),
+              let message = try? JSONSerialization.jsonObject(with: encodedMessage) as? [String: Any] else {
+            manager.logItems.log("Received an invalid relay message", isError: true)
+            return
+        }
+
+        if message["command"] as? String == "response",
+           let data = message["data"] as? [String: Any],
+           let code = data["code"] as? String,
+           let secret = data["secret"] as? String {
+            manager.saveCredentials(code: code, secret: secret, from: self)
+        }
+
+        guard let command = message["command"] as? String,
+              command == "get-version-info" || command == "get-validation-data" else {
+            return
+        }
+        guard let requestID = message["id"] else {
+            manager.logItems.log("Received a relay request without an id", isError: true)
+            return
+        }
+
+        if command == "get-version-info" {
+            guard let identifiers = getIdentifiers() else {
+                manager.logItems.log("Failed to read device identifiers", isError: true)
+                return
+            }
+            manager.logItems.log("Sending device version information")
+            sendJSON(
+                ["command": "response", "data": ["versions": identifiers], "id": requestID],
+                over: connection
+            )
+        } else {
+            manager.logItems.log("Generating validation data")
+            let validationData = generateValidationData()
+            manager.logItems.log("Generated validation data")
+            sendJSON(
+                [
+                    "command": "response",
+                    "data": ["data": validationData.base64EncodedString()],
+                    "id": requestID
+                ],
+                over: connection
+            )
+        }
+    }
+
     func webSocketDidReceiveMessage(connection: WebSocketConnection, data: Data) {
-        // Respond to a WebSocket connection receiving a binary `Data` message
-        //  let json = try! JSONSerialization.jsonObject(with: data, options: [])
-        print("got data msg")
-        print(data)
+        guard let manager, manager.isActive(self) else {
+            return
+        }
+        manager.noteActivity(from: self)
+        manager.logItems.log("Received an unexpected binary relay message", isError: true)
+    }
+
+    private func sendJSON(_ object: [String: Any], over connection: WebSocketConnection) {
+        guard let manager, manager.isActive(self) else {
+            return
+        }
+        do {
+            let data = try JSONSerialization.data(withJSONObject: object)
+            guard let message = String(data: data, encoding: .utf8) else {
+                manager.logItems.log("Failed to encode relay response", isError: true)
+                return
+            }
+            connection.send(string: message)
+        } catch {
+            manager.logItems.log("Failed to create relay response", isError: true)
+        }
     }
 }
-
