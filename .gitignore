@@ -1,5 +1,7 @@
 ValidationRelay.tipa
 EmbeddedValidationRelay
+/.build/
+/.local/
 
 # Xcode
 #
