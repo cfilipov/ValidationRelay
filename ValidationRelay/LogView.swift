@@ -15,11 +15,19 @@ struct LogItem: Identifiable, Hashable {
 }
 
 class LogItems: ObservableObject {
-    @Published var items: [LogItem] = []
+    private let maximumItemCount = 5_000
+    @Published private(set) var items: [LogItem] = []
     
     func log(_ message: String, isError: Bool = false) {
         let item = LogItem(message: message, isError: isError, date: Date())
         items.append(item)
+        if items.count > maximumItemCount {
+            items.removeFirst(items.count - maximumItemCount)
+        }
+    }
+
+    func clear() {
+        items.removeAll(keepingCapacity: true)
     }
 }
 
@@ -45,7 +53,7 @@ struct LogView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Clear") {
-                        logItems.items = []
+                        logItems.clear()
                     }
                 }
                 // Export log button
