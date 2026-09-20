@@ -63,6 +63,20 @@ final class RelayCredentialStoreTests: XCTestCase {
         XCTAssertEqual(defaults.string(forKey: RelayCredentialStore.legacyURLKey), credentials.serverURL)
     }
 
+    func testLoadRepairsLegacyKeysFromAuthoritativeRecord() {
+        let credentials = RelayCredentials(
+            code: "code",
+            secret: "secret",
+            serverURL: "wss://relay.example/provider"
+        )
+        let store = RelayCredentialStore(defaults: defaults)
+        store.save(credentials)
+        defaults.removeObject(forKey: RelayCredentialStore.legacySecretKey)
+
+        XCTAssertEqual(store.load(), .available(credentials))
+        XCTAssertEqual(defaults.string(forKey: RelayCredentialStore.legacySecretKey), "secret")
+    }
+
     func testClearRemovesBothCredentialFormats() {
         let store = RelayCredentialStore(defaults: defaults)
         store.save(RelayCredentials(

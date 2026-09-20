@@ -32,6 +32,7 @@ struct RelayCredentialStore {
         if let data = defaults.data(forKey: Self.recordKey),
            let credentials = try? JSONDecoder().decode(RelayCredentials.self, from: data),
            credentials.isComplete {
+            mirrorLegacyCredentials(credentials)
             return .available(credentials)
         }
 
@@ -61,6 +62,10 @@ struct RelayCredentialStore {
         // The single encoded record is authoritative. Keep the legacy keys in sync
         // so an in-place rollback to ValidationRelay 1.8 retains the same relay ID.
         defaults.set(data, forKey: Self.recordKey)
+        mirrorLegacyCredentials(credentials)
+    }
+
+    private func mirrorLegacyCredentials(_ credentials: RelayCredentials) {
         defaults.set(credentials.code, forKey: Self.legacyCodeKey)
         defaults.set(credentials.secret, forKey: Self.legacySecretKey)
         defaults.set(credentials.serverURL, forKey: Self.legacyURLKey)
