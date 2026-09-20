@@ -433,16 +433,32 @@ final class RelayConnectionDelegate: WebSocketConnectionDelegate {
             )
         } else {
             manager.logItems.log("Generating validation data")
-            let validationData = generateValidationData()
-            manager.logItems.log("Generated validation data")
-            sendJSON(
-                [
-                    "command": "response",
-                    "data": ["data": validationData.base64EncodedString()],
-                    "id": requestID
-                ],
-                over: connection
-            )
+            generateValidationData { [weak self, weak manager] result in
+                DispatchQueue.main.async {
+                    guard let self,
+                          let manager,
+                          manager.isActive(self) else {
+                        return
+                    }
+                    switch result {
+                    case .success(let validationData):
+                        manager.logItems.log("Generated validation data")
+                        self.sendJSON(
+                            [
+                                "command": "response",
+                                "data": ["data": validationData.base64EncodedString()],
+                                "id": requestID
+                            ],
+                            over: connection
+                        )
+                    case .failure(let error):
+                        manager.logItems.log(
+                            "Failed to generate validation data: \(error.localizedDescription)",
+                            isError: true
+                        )
+                    }
+                }
+            }
         }
     }
 

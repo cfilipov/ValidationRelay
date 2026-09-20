@@ -31,10 +31,11 @@ int NACInit(NSData *certificate, uint64_t *out_val_ctx, NSData **out_session_req
         NSLog(@"remoteNACInit failed: %d", ret);
         return ret;
     }
-    NSLog(@"done");
     *out_val_ctx = val_ctx;
     *out_session_request = [NSData dataWithBytes:(void *)session_request length:session_requestCnt];
-    //rawNACInit(
+    if (session_request != 0 && session_requestCnt > 0) {
+        vm_deallocate(mach_task_self(), session_request, session_requestCnt);
+    }
     return 0;
 }
 
@@ -51,16 +52,27 @@ int NACSign(uint64_t val_ctx, NSData *data, NSData **out_signature) {
         return ret;
     }
     *out_signature = [NSData dataWithBytes:(void *)signature length:signatureCnt];
+    if (signature != 0 && signatureCnt > 0) {
+        vm_deallocate(mach_task_self(), signature, signatureCnt);
+    }
     return 0;
 }
 
-NSString* buildNumber() {
-    size_t malloc_size = 10;
-    char *buildNumberBuf = malloc(malloc_size);
-    sysctlbyname("kern.osversion\0", (void *)buildNumberBuf, &malloc_size, NULL, 0);
-
-    // we don't need to free `buildNumberBuf` if we pass it into this method
-    NSString *buildNumber = [NSString stringWithCString:buildNumberBuf encoding:NSUTF8StringEncoding];
+NSString * _Nullable buildNumber(void) {
+    size_t bufferSize = 0;
+    if (sysctlbyname("kern.osversion", NULL, &bufferSize, NULL, 0) != 0 || bufferSize == 0) {
+        return nil;
+    }
+    char *buffer = calloc(bufferSize, sizeof(char));
+    if (buffer == NULL) {
+        return nil;
+    }
+    if (sysctlbyname("kern.osversion", buffer, &bufferSize, NULL, 0) != 0) {
+        free(buffer);
+        return nil;
+    }
+    NSString *buildNumber = [NSString stringWithUTF8String:buffer];
+    free(buffer);
     return buildNumber;
 }
 
