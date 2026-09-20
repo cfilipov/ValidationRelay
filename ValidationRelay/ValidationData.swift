@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 enum ValidationDataError: LocalizedError {
@@ -7,6 +8,7 @@ enum ValidationDataError: LocalizedError {
     case nativeFailure(String, Int)
     case nativeOutputMissing(String)
     case requestTimedOut
+    case bundledCertificateInvalid
 
     var errorDescription: String? {
         switch self {
@@ -22,12 +24,54 @@ enum ValidationDataError: LocalizedError {
             return "\(operation) did not return data."
         case .requestTimedOut:
             return "The validation request timed out."
+        case .bundledCertificateInvalid:
+            return "The bundled Apple validation certificate failed verification."
         }
     }
 }
 
 private let validationQueue = DispatchQueue(label: "dev.jjtech.ValidationRelay.validation")
 private let validationRequestTimeout: TimeInterval = 30
+private let bundledValidationCertificateSHA256 = "1b172b7411b63a03c6e220c11a5b7c6d08da91a418b59e5b2794aac0ec6ee4da"
+private let bundledValidationCertificateBase64 = """
+AQIAAAQWMIIEEjCCAvqgAwIBAgIBHDANBgkqhkiG9w0BAQUFADBiMQswCQYDVQQGEwJVUzETMBEGA1UEChMKQXBw
+bGUgSW5jLjEmMCQGA1UECxMdQXBwbGUgQ2VydGlmaWNhdGlvbiBBdXRob3JpdHkxFjAUBgNVBAMTDUFwcGxlIFJv
+b3QgQ0EwHhcNMTEwMTI2MTkwMTM0WhcNMTkwMTI2MTkwMTM0WjCBhTELMAkGA1UEBhMCVVMxEzARBgNVBAoMCkFw
+cGxlIEluYy4xJjAkBgNVBAsMHUFwcGxlIENlcnRpZmljYXRpb24gQXV0aG9yaXR5MTkwNwYDVQQDDDBBcHBsZSBT
+eXN0ZW0gSW50ZWdyYXRpb24gQ2VydGlmaWNhdGlvbiBBdXRob3JpdHkwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAw
+ggEKAoIBAQDa4A+Yl8tYKYYqC7ieGVoxwy0OaixSAe4dA/uCQWnNUCY2ercMbw45A7jUGFajCLI8w/s2QeTXyGdg
+MgtOMn2H9/3NU7AauvwfbMlFB62COPOofMROwrFW2T6ybW0EQRrBmkfArBV8LXiRqweiZbF6g92YS3dA2O5Q68dr
+WAgGl1dVfSf4Cua1Feenk/nxgOZCeT8W0zKdEXZBKQoxCe8PW/jzp6n3Ug27+C10rKZJHx/OewWnhT2+z6KnqiOF
+Zv7FFhJ+W+Ixd5ECCd9+fuSK4OxBrBcsBOC8eaSJeEQGiztLoLyE4rCCtTK+BBwD7YI+dTcUz3WfgjFtzwkUhtEn
+AgMBAAGjga4wgaswDgYDVR0PAQH/BAQDAgGGMA8GA1UdEwEB/wQFMAMBAf8wHQYDVR0OBBYEFPAwc2Py7x2szOYJ
+MsH6eXqxaVBoMB8GA1UdIwQYMBaAFCvQaUeUdgn+9GuNLkCm90dNfwheMDYGA1UdHwQvMC0wK6ApoCeGJWh0dHA6
+Ly93d3cuYXBwbGUuY29tL2FwcGxlY2Evcm9vdC5jcmwwEAYKKoZIhvdjZAYCBAQCBQAwDQYJKoZIhvcNAQEFBQAD
+ggEBAD17j60fDCKKm0ujz/grsB9o4Qz3nCSDFgMt07Ko0EPorzyXJsit1SzETFVTAUnQ4rT75tty0Zi7/JvITreP
+zGWGf0S52icqTt/L39N930Fx+LPAHaIKM7nsK8Vzcvvhyl2OLzT0a8RPD8iKrA/7byVut66Ox+QCuCBOXVZMSZex
+JHR+yZOTNIyZ0afAHNPUwq5p65+fV+Jox8rVxSKCZEFY/njRysH5NmprRPezhnJ6ZEAXMZ28rHXw+jNR5b0Balg/
+8ACumVwKwsnpXhyHAuygCFVBKpuMZIWOUAPN4BGvznIZ61Lzr5Ktky6Undav/8Am8d6UkhzZvD02zFX6ONsAAAUx
+MIIFLTCCBBWgAwIBAgIISyyRSB2bfaAwDQYJKoZIhvcNAQEFBQAwgYUxCzAJBgNVBAYTAlVTMRMwEQYDVQQKDApB
+cHBsZSBJbmMuMSYwJAYDVQQLDB1BcHBsZSBDZXJ0aWZpY2F0aW9uIEF1dGhvcml0eTE5MDcGA1UEAwwwQXBwbGUg
+U3lzdGVtIEludGVncmF0aW9uIENlcnRpZmljYXRpb24gQXV0aG9yaXR5MB4XDTExMDMyNTAxMTMzMloXDTE0MDMy
+NDAxMTMzMlowaTEdMBsGA1UEAwwURFJNIFRlY2hub2xvZ2llcyBBMDExJjAkBgNVBAsMHUFwcGxlIENlcnRpZmlj
+YXRpb24gQXV0aG9yaXR5MRMwEQYDVQQKDApBcHBsZSBJbmMuMQswCQYDVQQGEwJVUzCCASIwDQYJKoZIhvcNAQEB
+BQADggEPADCCAQoCggEBALQGbX5lc5fhv0mx+poiLqfTcYEga0lBFcLbYHrGordNei+OwWMHHATMk9jgDci48lvO
+bfpCyxBAwiQKp+QdJoKKPjCGXe0XOO6Hq73oSEpJd4Uut5GEmyl9QQWgefWtjMEL2J1p55yyqUbQS/4JGFAkillH
+KyJVR+1RIp1C6Z3ugcNHzeRvCio/TyvSBNC4jOhkmN/OYFObiBrP1MINdGW/84WHX0uHEKKHim0+QFUO+Z+ZzDKT
+g1GIybn4XskZXxfna5t8Ot3/aN/U0TRVdOz3S+gckHWF8vxD/6VEI1I/+/Uh44MWP74KdPk8dJlq/j/SWqFQ4y6L
+SA0iJjvVnkkCAwEAAaOCAbowggG2MB0GA1UdDgQWBBTSJCP76+iOj3GchO5icz3pXiQJLzAMBgNVHRMBAf8EAjAA
+MB8GA1UdIwQYMBaAFPAwc2Py7x2szOYJMsH6eXqxaVBoMIIBDgYDVR0gBIIBBTCCAQEwgf4GCSqGSIb3Y2QFATCB
+8DAoBggrBgEFBQcCARYcaHR0cDovL3d3dy5hcHBsZS5jb20vYXBwbGVjYTCBwwYIKwYBBQUHAgIwgbYMgbNSZWxp
+YW5jZSBvbiB0aGlzIGNlcnRpZmljYXRlIGJ5IGFueSBwYXJ0eSBhc3N1bWVzIGFjY2VwdGFuY2Ugb2YgdGhlIHRo
+ZW4gYXBwbGljYWJsZSBzdGFuZGFyZCB0ZXJtcyBhbmQgY29uZGl0aW9ucyBvZiB1c2UsIGNlcnRpZmljYXRlIHBv
+bGljeSBhbmQgY2VydGlmaWNhdGlvbiBwcmFjdGljZSBzdGF0ZW1lbnRzLjAvBgNVHR8EKDAmMCSgIqAghh5odHRw
+Oi8vY3JsLmFwcGxlLmNvbS9hc2ljYS5jcmwwDgYDVR0PAQH/BAQDAgWgMBMGCiqGSIb3Y2QGDAEBAf8EAgUAMA0G
+CSqGSIb3DQEBBQUAA4IBAQB9eadjbkE7vsHOsYz6bTAguLpJMJI9HVXOucItS2LFykD2t7yx9tKm+q0Ba08czK7O
+RiD/wrPALHdP0BNETIfHYS0Px8xDLjc6N/2umJoStkmwqnfTU4GWgM2E23OqR6ggVjbC2aXpDDwiHXnv57BPCX1e
++7Iio7b3IyUJg3moNFaE5kWtIqEcVZyiLx+2Ibn/2A/Jcwl28AMXGY/po/zmQstfZIaWjGg/wqBYQtSfdm2Vv8D3
+2xR0/Fqogsem/FaKN7fIcpy8m0TRRuKNJNl/J3nxdLnFsrDC4SYG5P+vpQvZox6V20SRzOlLAjID5lL2pypaIzTQ
+HRfy6+rCeQrp
+"""
 
 private func fetchValidationData(_ request: URLRequest) throws -> Data {
     let semaphore = DispatchSemaphore(value: 0)
@@ -72,14 +116,34 @@ private func getCertificate() throws -> Data {
     guard let url = URL(string: "https://static.ess.apple.com/identity/validation/cert-1.0.plist") else {
         throw ValidationDataError.invalidResponse
     }
-    let data = try fetchValidationData(URLRequest(url: url))
-    guard let plist = try PropertyListSerialization.propertyList(
-        from: data,
-        options: [],
-        format: nil
-    ) as? [String: Any],
-    let certificate = plist["cert"] as? Data else {
-        throw ValidationDataError.missingPlistValue("cert")
+    do {
+        let data = try fetchValidationData(URLRequest(url: url))
+        guard let plist = try PropertyListSerialization.propertyList(
+            from: data,
+            options: [],
+            format: nil
+        ) as? [String: Any],
+        let certificate = plist["cert"] as? Data else {
+            throw ValidationDataError.missingPlistValue("cert")
+        }
+        return certificate
+    } catch {
+        return try verifiedBundledCertificate()
+    }
+}
+
+private func verifiedBundledCertificate() throws -> Data {
+    guard let certificate = Data(
+        base64Encoded: bundledValidationCertificateBase64,
+        options: .ignoreUnknownCharacters
+    ) else {
+        throw ValidationDataError.bundledCertificateInvalid
+    }
+    let digest = SHA256.hash(data: certificate)
+        .map { String(format: "%02x", $0) }
+        .joined()
+    guard digest == bundledValidationCertificateSHA256 else {
+        throw ValidationDataError.bundledCertificateInvalid
     }
     return certificate
 }
