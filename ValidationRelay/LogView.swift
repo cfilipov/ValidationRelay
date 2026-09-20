@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct LogItem: Identifiable, Hashable {
     var id = UUID()
@@ -31,8 +32,24 @@ class LogItems: ObservableObject {
     }
 }
 
+private struct LogExport: Identifiable {
+    let id = UUID()
+    let text: String
+}
+
+private struct ActivityView: UIViewControllerRepresentable {
+    let activityItems: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
 struct LogView: View {
     @ObservedObject var logItems: LogItems
+    @State private var logExport: LogExport?
     
     var body: some View {
         List {
@@ -64,12 +81,14 @@ struct LogView: View {
                         let logString = logItems.items.map { item in
                             "\(item.date): \(item.message)"
                         }.joined(separator: "\n")
-                        let av = UIActivityViewController(activityItems: [logString], applicationActivities: nil)
-                        UIApplication.shared.windows.first?.rootViewController?.present(av, animated: true, completion: nil)
+                        logExport = LogExport(text: logString)
                     }) {
                         Image(systemName: "square.and.arrow.up")
                     }
                 }
+            }
+            .sheet(item: $logExport) { export in
+                ActivityView(activityItems: [export.text])
             }
     }
 }
